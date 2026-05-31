@@ -1,7 +1,7 @@
 {
-  "name": "backend",
+  "name": "jahansaaS-backend",
   "version": "1.0.0",
-  "description": "JahanSaaS Backend API",
+  "description": "Backend API for JahanSaaS Platform",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -12,7 +12,7 @@
     "node": "20.18.0",
     "npm": "10.8.1"
   },
-  "keywords": ["saas", "api", "jahansaaS"],
+  "keywords": ["saas", "api", "jahansaaS", "school", "pharmacy", "business"],
   "author": "JahanSaaS",
   "license": "ISC",
   "type": "commonjs",
