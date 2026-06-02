@@ -13,6 +13,13 @@ dotenv.config();
 // Initialize Express
 const app = express();
 
+// Check memory at startup
+const totalMemory = require('v8').getHeapStatistics().heap_size_limit / 1024 / 1024;
+console.log(`📊 Heap limit: ${totalMemory} MB`);
+if (totalMemory < 1024) {
+  console.warn('⚠️ Low memory limit! Consider increasing node memory limit');
+}
+
 // Security middleware
 app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" },
@@ -32,14 +39,12 @@ const corsOptions = {
       'https://jahansaaS.com'
     ].filter(Boolean);
     
-    // Allow requests with no origin (like mobile apps or curl)
     if (!origin) return callback(null, true);
-    
     if (allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV !== 'production') {
       callback(null, true);
     } else {
       console.warn(`CORS blocked request from origin: ${origin}`);
-      callback(null, true); // Allow in development
+      callback(null, true);
     }
   },
   credentials: true,
@@ -50,21 +55,37 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 
+// Memory monitoring middleware
+app.use((req, res, next) => {
+  const memoryUsage = process.memoryUsage();
+  const heapUsedMB = memoryUsage.heapUsed / 1024 / 1024;
+  
+  if (heapUsedMB > 400) {
+    console.warn(`⚠️ High memory usage: ${heapUsedMB.toFixed(2)} MB`);
+  }
+  
+  // Set timeouts to prevent hanging requests
+  req.setTimeout(30000);
+  res.setTimeout(30000);
+  
+  next();
+});
+
 // Rate limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
+  windowMs: 15 * 60 * 1000,
+  max: 100,
   message: { success: false, error: 'Too many requests from this IP, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.path === '/api/health' // Skip rate limiting for health check
+  skip: (req) => req.path === '/api/health'
 });
 app.use('/api/', limiter);
 
 // Stricter rate limit for auth routes
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20, // limit each IP to 20 auth requests per 15 minutes
+  windowMs: 15 * 60 * 1000,
+  max: 20,
   message: { success: false, error: 'Too many authentication attempts, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -72,9 +93,9 @@ const authLimiter = rateLimit({
 });
 app.use('/api/auth/', authLimiter);
 
-// Body parsing middleware
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Body parsing middleware with limits
+app.use(express.json({ limit: '5mb' })); // Reduced from 10mb
+app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 
 // Logging
 if (process.env.NODE_ENV === 'development') {
@@ -86,7 +107,7 @@ if (process.env.NODE_ENV === 'development') {
 // Static files
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// MongoDB Connection with retry logic
+// MongoDB Connection with optimized settings
 let isConnected = false;
 
 const connectDB = async (retryCount = 0) => {
@@ -98,10 +119,13 @@ const connectDB = async (retryCount = 0) => {
     
     await mongoose.connect(process.env.MONGODB_URI, {
       serverSelectionTimeoutMS: 5000,
-      socketTimeoutMS: 45000,
+      socketTimeoutMS: 30000, // Reduced from 45000
       family: 4,
-      maxPoolSize: 10,
-      minPoolSize: 2
+      maxPoolSize: 5, // Reduced from 10
+      minPoolSize: 1, // Reduced from 2
+      maxIdleTimeMS: 30000, // Close idle connections after 30 seconds
+      heartbeatFrequencyMS: 10000,
+      connectTimeoutMS: 10000
     });
     
     isConnected = true;
@@ -113,12 +137,12 @@ const connectDB = async (retryCount = 0) => {
     isConnected = false;
     console.error(`❌ MongoDB Connection Error (attempt ${retryCount + 1}):`, error.message);
     
-    if (retryCount < 5) {
-      const delay = Math.min(5000 * Math.pow(2, retryCount), 30000);
+    if (retryCount < 3) { // Reduced from 5
+      const delay = Math.min(5000 * Math.pow(2, retryCount), 15000);
       console.log(`Retrying connection in ${delay / 1000} seconds...`);
       setTimeout(() => connectDB(retryCount + 1), delay);
     } else {
-      console.error('Failed to connect to MongoDB after 5 attempts');
+      console.error('Failed to connect to MongoDB after 3 attempts');
       console.error('Please check your MongoDB URI and network connectivity');
       process.exit(1);
     }
@@ -133,7 +157,7 @@ mongoose.connection.on('disconnected', () => {
   console.log('⚠️ MongoDB disconnected');
   if (!isConnected) {
     console.log('Attempting to reconnect...');
-    setTimeout(connectDB, 5000);
+    setTimeout(() => connectDB(0), 5000);
   }
 });
 
@@ -190,12 +214,12 @@ try {
   dashboardRoutes = (req, res) => res.status(500).json({ error: 'Dashboard routes not available' });
 }
 
-// Optional routes (create placeholder if not exists)
+// Optional routes
 try {
   adminRoutes = require('./routes/admin');
   console.log('✅ Admin routes loaded');
 } catch (error) {
-  console.log('⚠️ Admin routes not found, creating placeholder');
+  console.log('⚠️ Admin routes not found');
   adminRoutes = (req, res) => res.status(501).json({ error: 'Admin routes not implemented yet' });
 }
 
@@ -203,7 +227,7 @@ try {
   userRoutes = require('./routes/users');
   console.log('✅ User routes loaded');
 } catch (error) {
-  console.log('⚠️ User routes not found, creating placeholder');
+  console.log('⚠️ User routes not found');
   userRoutes = (req, res) => res.status(501).json({ error: 'User routes not implemented yet' });
 }
 
@@ -211,7 +235,7 @@ try {
   paymentRoutes = require('./routes/payments');
   console.log('✅ Payment routes loaded');
 } catch (error) {
-  console.log('⚠️ Payment routes not found, creating placeholder');
+  console.log('⚠️ Payment routes not found');
   paymentRoutes = (req, res) => res.status(501).json({ error: 'Payment routes not implemented yet' });
 }
 
@@ -227,6 +251,7 @@ app.use('/api/payments', paymentRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
+  const memoryUsage = process.memoryUsage();
   const healthCheck = {
     status: 'OK',
     timestamp: new Date().toISOString(),
@@ -234,15 +259,12 @@ app.get('/api/health', (req, res) => {
     environment: process.env.NODE_ENV || 'development',
     mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
     mongodbState: mongoose.STATES[mongoose.connection.readyState],
-    memory: process.memoryUsage(),
-    version: process.version,
-    routes: {
-      auth: '/api/auth',
-      services: '/api/services',
-      bookings: '/api/bookings',
-      contact: '/api/contact',
-      dashboard: '/api/dashboard'
-    }
+    memory: {
+      heapUsed: (memoryUsage.heapUsed / 1024 / 1024).toFixed(2) + ' MB',
+      heapTotal: (memoryUsage.heapTotal / 1024 / 1024).toFixed(2) + ' MB',
+      rss: (memoryUsage.rss / 1024 / 1024).toFixed(2) + ' MB'
+    },
+    version: process.version
   };
   
   const statusCode = mongoose.connection.readyState === 1 ? 200 : 503;
@@ -256,38 +278,11 @@ app.get('/', (req, res) => {
     version: '2.0.0',
     status: 'operational',
     environment: process.env.NODE_ENV,
-    documentation: '/api/health',
-    endpoints: {
-      auth: {
-        register: 'POST /api/auth/register',
-        login: 'POST /api/auth/login',
-        me: 'GET /api/auth/me'
-      },
-      services: {
-        list: 'GET /api/services',
-        detail: 'GET /api/services/:id',
-        create: 'POST /api/services',
-        update: 'PUT /api/services/:id',
-        delete: 'DELETE /api/services/:id'
-      },
-      bookings: {
-        list: 'GET /api/bookings',
-        detail: 'GET /api/bookings/:id',
-        create: 'POST /api/bookings',
-        update: 'PUT /api/bookings/:id',
-        cancel: 'DELETE /api/bookings/:id'
-      },
-      contact: {
-        send: 'POST /api/contact'
-      },
-      dashboard: {
-        stats: 'GET /api/dashboard/stats'
-      }
-    }
+    memory: process.memoryUsage().heapUsed / 1024 / 1024 + ' MB'
   });
 });
 
-// 404 handler - must be after all routes
+// 404 handler
 app.use((req, res) => {
   res.status(404).json({
     success: false,
@@ -297,14 +292,12 @@ app.use((req, res) => {
   });
 });
 
-// Global error handler - must be last
+// Global error handler
 app.use((err, req, res, next) => {
   console.error('Global Error:', {
     message: err.message,
-    stack: err.stack,
     url: req.url,
-    method: req.method,
-    ip: req.ip
+    method: req.method
   });
   
   // Mongoose validation error
@@ -313,7 +306,7 @@ app.use((err, req, res, next) => {
     return res.status(400).json({
       success: false,
       error: 'Validation Error',
-      details: errors,
+      details: errors.slice(0, 5), // Limit error details
       status: 400
     });
   }
@@ -351,63 +344,70 @@ app.use((err, req, res, next) => {
   res.status(status).json({
     success: false,
     error: message,
-    status,
-    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
+    status
   });
 });
 
 // Graceful shutdown
+let server = null;
+
 const gracefulShutdown = async (signal) => {
   console.log(`${signal} signal received: closing HTTP server`);
   
-  // Close server first
-  server.close(async () => {
-    console.log('HTTP server closed');
-    
-    // Close database connection
-    if (mongoose.connection.readyState === 1) {
-      try {
-        await mongoose.connection.close();
-        console.log('MongoDB connection closed');
-      } catch (error) {
-        console.error('Error closing MongoDB connection:', error);
+  if (server) {
+    server.close(async () => {
+      console.log('HTTP server closed');
+      
+      if (mongoose.connection.readyState === 1) {
+        try {
+          await mongoose.connection.close();
+          console.log('MongoDB connection closed');
+        } catch (error) {
+          console.error('Error closing MongoDB connection:', error);
+        }
       }
-    }
+      
+      console.log('Graceful shutdown completed');
+      process.exit(0);
+    });
     
-    console.log('Graceful shutdown completed');
+    // Force close after 10 seconds
+    setTimeout(() => {
+      console.error('Could not close connections in time, forcefully shutting down');
+      process.exit(1);
+    }, 10000);
+  } else {
     process.exit(0);
-  });
-  
-  // Force close after 10 seconds
-  setTimeout(() => {
-    console.error('Could not close connections in time, forcefully shutting down');
-    process.exit(1);
-  }, 10000);
+  }
 };
 
 // Handle shutdown signals
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-// Handle uncaught exceptions
+// FIXED: Handle uncaught exceptions - DON'T shutdown, just log
 process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error);
-  gracefulShutdown('Uncaught Exception');
+  console.error('❌ Uncaught Exception:', error.message);
+  console.error('Stack:', error.stack);
+  // Don't exit - keep the server running
 });
 
-// Handle unhandled promise rejections
+// FIXED: Handle unhandled rejections - DON'T shutdown, just log
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  gracefulShutdown('Unhandled Rejection');
+  console.error('❌ Unhandled Rejection at:', promise);
+  console.error('Reason:', reason);
+  // Don't call gracefulShutdown here - just log and continue
 });
 
 // Start server
-const server = app.listen(PORT, () => {
+const PORT = process.env.PORT || 5000;
+server = app.listen(PORT, () => {
   console.log(`\n🚀 Server running on port ${PORT}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🔗 API URL: http://localhost:${PORT}`);
   console.log(`❤️ Health Check: http://localhost:${PORT}/api/health`);
   console.log(`📡 Root Endpoint: http://localhost:${PORT}/\n`);
+  console.log(`💾 Memory usage: ${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2)} MB`);
 });
 
 module.exports = { app, server };
