@@ -1,17 +1,17 @@
 const express = require('express');
 const router = express.Router();
 const Booking = require('../models/Booking');
-const Service = require('../models/Service'); // Moved outside to avoid circular dependency
-const auth = require('../middleware/auth');
+const Service = require('../models/Service');
+const { protect } = require('../middleware/auth');
 
 // @route   GET /api/bookings
 // @desc    Get all bookings for the logged-in user
-router.get('/', auth, async (req, res) => {
+router.get('/', protect, async (req, res) => {
   try {
     const bookings = await Booking.find({ 
-      $or: [{ clientId: req.userId }, { providerId: req.userId }] 
+      $or: [{ clientId: req.user._id }, { providerId: req.user._id }] 
     })
-    .populate('serviceId', 'title price category')
+    .populate('serviceId', 'title price category images')
     .populate('clientId', 'name email companyName')
     .populate('providerId', 'name companyName')
     .sort({ createdAt: -1 });
@@ -29,7 +29,7 @@ router.get('/', auth, async (req, res) => {
 
 // @route   GET /api/bookings/:id
 // @desc    Get single booking by ID
-router.get('/:id', auth, async (req, res) => {
+router.get('/:id', protect, async (req, res) => {
   try {
     const booking = await Booking.findById(req.params.id)
       .populate('serviceId', 'title description price category images')
@@ -40,9 +40,9 @@ router.get('/:id', auth, async (req, res) => {
       return res.status(404).json({ error: 'Booking not found' });
     }
     
-    // Check if user is authorized to view this booking
-    if (booking.clientId._id.toString() !== req.userId && 
-        booking.providerId._id.toString() !== req.userId) {
+    // Check if user is authorized
+    if (booking.clientId._id.toString() !== req.user._id.toString() && 
+        booking.providerId._id.toString() !== req.user._id.toString()) {
       return res.status(403).json({ error: 'Not authorized to view this booking' });
     }
     
@@ -54,25 +54,36 @@ router.get('/:id', auth, async (req, res) => {
 
 // @route   POST /api/bookings
 // @desc    Create a new booking
-router.post('/', auth, async (req, res) => {
+router.post('/', protect, async (req, res) => {
   try {
     const { serviceId, date, quantity, specialRequests, totalAmount } = req.body;
     
-    // Get service to find providerId
+    // Validate service exists
     const service = await Service.findById(serviceId);
-    
     if (!service) {
       return res.status(404).json({ error: 'Service not found' });
     }
     
+    // Check if service is active
+    if (!service.isActive) {
+      return res.status(400).json({ error: 'This service is currently not available' });
+    }
+    
+    // Calculate total amount if not provided
+    const finalTotal = totalAmount || (service.price * (quantity || 1));
+    
+    // Create booking
     const booking = new Booking({
       serviceId,
-      clientId: req.userId,
+      clientId: req.user._id,
       providerId: service.providerId,
       date: date || new Date(),
       quantity: quantity || 1,
-      specialRequests,
-      totalAmount: totalAmount || service.price * (quantity || 1),
+      unitPrice: service.price,
+      totalAmount: finalTotal,
+      discountAmount: 0,
+      finalAmount: finalTotal,
+      specialRequests: specialRequests || '',
       status: 'pending',
       paymentStatus: 'pending'
     });
@@ -96,7 +107,7 @@ router.post('/', auth, async (req, res) => {
 
 // @route   PUT /api/bookings/:id
 // @desc    Update booking status
-router.put('/:id', auth, async (req, res) => {
+router.put('/:id', protect, async (req, res) => {
   try {
     const { status, paymentStatus } = req.body;
     const booking = await Booking.findById(req.params.id);
@@ -106,13 +117,15 @@ router.put('/:id', auth, async (req, res) => {
     }
     
     // Check authorization (only client or provider can update)
-    if (booking.clientId.toString() !== req.userId && 
-        booking.providerId.toString() !== req.userId) {
+    if (booking.clientId.toString() !== req.user._id.toString() && 
+        booking.providerId.toString() !== req.user._id.toString()) {
       return res.status(403).json({ error: 'Not authorized to update this booking' });
     }
     
     // Update fields
-    if (status) booking.status = status;
+    if (status) {
+      booking.addStatusHistory(status, `Status updated to ${status}`, req.user._id);
+    }
     if (paymentStatus) booking.paymentStatus = paymentStatus;
     
     await booking.save();
@@ -129,7 +142,7 @@ router.put('/:id', auth, async (req, res) => {
 
 // @route   DELETE /api/bookings/:id
 // @desc    Cancel/Delete booking
-router.delete('/:id', auth, async (req, res) => {
+router.delete('/:id', protect, async (req, res) => {
   try {
     const booking = await Booking.findById(req.params.id);
     
@@ -138,12 +151,18 @@ router.delete('/:id', auth, async (req, res) => {
     }
     
     // Only client can cancel their booking
-    if (booking.clientId.toString() !== req.userId) {
+    if (booking.clientId.toString() !== req.user._id.toString()) {
       return res.status(403).json({ error: 'Only the client can cancel this booking' });
     }
     
-    // Soft delete - just mark as cancelled
+    // Check if booking is cancellable
+    if (!booking.isCancellable()) {
+      return res.status(400).json({ error: 'This booking cannot be cancelled at this time' });
+    }
+    
+    // Soft delete - mark as cancelled
     booking.status = 'cancelled';
+    booking.addStatusHistory('cancelled', 'Booking cancelled by client', req.user._id);
     await booking.save();
     
     res.json({
@@ -156,11 +175,11 @@ router.delete('/:id', auth, async (req, res) => {
 });
 
 // @route   GET /api/bookings/my/bookings
-// @desc    Get user's own bookings (client)
-router.get('/my/bookings', auth, async (req, res) => {
+// @desc    Get user's own bookings (as client)
+router.get('/my/bookings', protect, async (req, res) => {
   try {
-    const bookings = await Booking.find({ clientId: req.userId })
-      .populate('serviceId', 'title price category')
+    const bookings = await Booking.find({ clientId: req.user._id })
+      .populate('serviceId', 'title price category images')
       .populate('providerId', 'name companyName')
       .sort({ createdAt: -1 });
     
@@ -175,11 +194,11 @@ router.get('/my/bookings', auth, async (req, res) => {
 });
 
 // @route   GET /api/bookings/my/services
-// @desc    Get bookings for user's services (provider)
-router.get('/my/services', auth, async (req, res) => {
+// @desc    Get bookings for user's services (as provider)
+router.get('/my/services', protect, async (req, res) => {
   try {
-    const bookings = await Booking.find({ providerId: req.userId })
-      .populate('serviceId', 'title price category')
+    const bookings = await Booking.find({ providerId: req.user._id })
+      .populate('serviceId', 'title price category images')
       .populate('clientId', 'name email companyName')
       .sort({ createdAt: -1 });
     
